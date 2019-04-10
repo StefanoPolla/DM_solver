@@ -7,10 +7,10 @@ class phase_microwave_RWA{
 	std::string modulation = "block";
 	double sigma;
 	double mu;
-	arma::cx_vec pulse_data;
-	arma::cx_vec pulse_data_conj;
-	arma::cx_mat matrix_element_up;
-	arma::cx_mat matrix_element_down;
+	arma::cx_vec pulse_data; // complex wave, loaded by preload
+	arma::cx_vec pulse_data_conj; // conjugate wave
+	arma::cx_mat matrix_element_up; // upper triangle (diag included)
+	arma::cx_mat matrix_element_down;  // lower triangle (diag excluded)
 
 	double get_amplitude(double time){
 			if (! modulation.compare("block")){
@@ -49,7 +49,8 @@ class phase_microwave_RWA{
 		}
 
 		void preload(double start, double stop, int steps){
-			// simple function that performs integration
+			// simple function that performs integration <- NOTE*: wouldn't call it so. 
+			//     	                                        actually, loads pulse_data and pulse_data_conj with complex exps
 			arma::vec times = arma::linspace<arma::vec>(start,stop,steps+1);
 			pulse_data = arma::zeros<arma::cx_vec>(steps);
 
@@ -66,16 +67,17 @@ class phase_microwave_RWA{
 			}
 			else{
 				for (int i = start_index; i < stop_index; ++i){
-					pulse_data[i] = amp*(get_amplitude(times[i]) + get_amplitude(times[i+1]))/2*std::exp(j*phase)/(j*frequency*M_PI*2.)*(
-								std::exp(j*frequency*2.*M_PI*(times[i +1]))
-								-std::exp(j*frequency*2.*M_PI*(times[i])));
+					pulse_data[i] = (amp*(get_amplitude(times[i]) + get_amplitude(times[i+1]))/2*
+									std::exp(j*phase)/(j*frequency*M_PI*2.)*(
+									std::exp(j*frequency*2.*M_PI*(times[i +1]))
+									-std::exp(j*frequency*2.*M_PI*(times[i]))));
 				}
 			}
 			pulse_data_conj = arma::conj(pulse_data);
 		}
 
 		void fetch_H(arma::cx_cube* H0, int start, int end){
-			// Just simple numerical integration.
+			// Just simple numerical integration. <- NOTE: wouldn't call it so.
 			for (int i = start; i < end; ++i){
 				H0->slice(i - start) += matrix_element_up*pulse_data(i) + matrix_element_down*pulse_data_conj(i);
 			}
@@ -134,7 +136,8 @@ private:
 		return init_pulse;
 	}
 	arma::vec apply_IRR_filter(arma::vec b, arma::vec a, arma::vec * ideal_signal){
-		// Apply filter function -- simple implementation (can prob be faster (see scipy approach), but mathematically we are correct :) )
+		// Apply filter function -- simple implementation 
+		// (can prob be faster (see scipy approach), but mathematically we are correct :) )
 		// b are the feedforward filter coefficients
 		// a are the feedback filter coefficients
 
@@ -236,7 +239,8 @@ public:
 
 	void preload(double start_time, double end_time, int steps){
 		// Generate amplitudes for all steps
-		// Note that the amplitude at time 0 is infact the amplitude between t[0] and t[1] (your itegral goes from a to b, so you need to take the middle element)
+		// Note that the amplitude at time 0 is infact the amplitude between t[0] and t[1] 
+		// (your itegral goes from a to b, so you need to take the middle element)
 		pulse_data = generate_pulse(start_time, end_time, steps);
 	}
 
@@ -296,7 +300,8 @@ public:
 			amplitude: amplitude of the sinus
 			phi: relative phase of the microwave
 			freq: frequency of the applied field
-			pulse: AWG pulse object, shapes the pulse (note that the amplitude should can be set using this object, but best practive would be is to set it to one and use the amplitude given before.)
+			pulse: AWG pulse object, shapes the pulse (note that the amplitude should can be set using this 
+			object, but best practice would be to set it to one and use the amplitude given before.)
 			input_matrix: 2D matrix that describes on which matrix elements the microwave pulse drives.
 
 		Returns: 
@@ -313,7 +318,7 @@ public:
 
 
 	void preload(double start, double stop, int steps){
-		// simple function that performs integration
+		// simple function that performs integration <- NOTE*: wouldn't call it so.
 		arma::vec times = arma::linspace<arma::vec>(start,stop,steps+1);
 		pulse_data = arma::zeros<arma::cx_vec>(steps);
 		const double delta_t = (stop-start)/steps;
@@ -325,7 +330,7 @@ public:
 			const double delta_t = (stop-start)/steps;
 
 			for (int i = start_index; i < stop_index; ++i){
-					pulse_data[i] = delta_t*amp*std::cos(times[i]*frequency*2.*M_PI + phase);
+					pulse_data[i] = delta_t*amp*std::cos(times[i]*frequency*2.*M_PI + phase); // NOTE: the amplitude is rescaled by dt (actually, integrated amplitude)
 			}
 
 			pulse_data_conj = arma::conj(pulse_data);
@@ -339,7 +344,7 @@ public:
 	}
 
 	void fetch_H(arma::cx_cube* H0, int start, int end){
-		// Just simple numerical integration.
+		// Just simple numerical integration. <- NOTE*: wouldn't call it so.
 		for (int i = start; i < end; ++i){
 			H0->slice(i - start) += matrix_element*pulse_data(i);
 		}

@@ -53,6 +53,32 @@ cdef extern from "VonNeuman_core.h":
 		void init(Mat[double], Mat[double])
 		vec generate_pulse(double, double, double)
 
+# NOTE: declare lindblad solver
+#cdef extern from "Lindblad_core.h":
+	cdef cppclass LindbladSolver:
+		LindbladSolver(double)
+		int test_cython() # NOTE: test addition
+		void add_H0(cx_mat)
+		void add_H1_list(cx_mat,cx_vec)
+		void add_H1_AWG(Mat[double], cx_mat)
+		void add_H1_AWG(Mat[double], cx_mat, Mat[double])
+		void add_H1_MW_RWA(cx_mat,double, double, double, double, double)
+		void add_H1_MW_obj_RWA(phase_microwave_RWA)
+		void add_H1_MW_obj(MW_pulse)
+		void add_H1_element_dep_f(cx_mat, int, int, cx_mat)
+		void add_static_gauss_noise(cx_mat, double)
+		void add_noise_object(noise)
+		void add_1f_noise(cx_mat, double, double)
+		void mk_param_time_dep(Mat[int], double)
+		void add_lindbladian(cx_mat, double)
+		void set_number_of_evalutions(int)
+		void calculate_evolution(cx_mat, double, double, int)
+		Mat[double] return_expectation_values(cx_cube)
+		cx_mat get_unitary()
+		cx_mat get_lastest_rho()
+		cx_cube get_all_density_matrices()
+
+
 cdef class microwave_RWA:
 	cdef phase_microwave_RWA* MW_RWA_obj
 
@@ -166,7 +192,6 @@ cdef class VonNeumann:
 	def __dealloc__(self):
 		del self.Neum_obj
 
-
 	def add_H0(self, np.ndarray[ np.complex_t, ndim=2 ] input_matrix):
 		self.Neum_obj.add_H0(np2cx_mat(input_matrix))
 
@@ -279,3 +304,132 @@ cdef class VonNeumann:
 		output = cx_cube2np(density, output)
 		return output
 
+
+# NOTE: define lindblad solver
+cdef class Lindblad:
+	cdef LindbladSolver* Lind_obj
+	cdef np.ndarray times
+	def __cinit__(self, double size):
+		self.Lind_obj = new LindbladSolver(size)
+
+	def __dealloc__(self):
+		del self.Lind_obj
+
+	def test_cython(self):
+		print('this is printed by the .pyx wrapper')
+		return self.Lind_obj.test_cython()
+
+	def add_H0(self, np.ndarray[ np.complex_t, ndim=2 ] input_matrix):
+		self.Lind_obj.add_H0(np2cx_mat(input_matrix))
+
+	def add_H1_list(self, np.ndarray[ np.complex_t, ndim=2 ] input_matrix, np.ndarray[ np.complex_t, ndim=1 ] input_list):
+		self.Lind_obj.add_H1_list(np2cx_mat(input_matrix),np2cx_vec(input_list))
+
+	def add_H1_AWG(self, np.ndarray[ np.double_t, ndim=2 ] time_input, np.ndarray[ np.complex_t, ndim=2 ] input_matrix, filters = None):
+		'''
+		Adds AWG pulse,
+		Time_input: array with timings (see manual)
+		input matrix: matrix elements that must be pulsed (unit in RAD)
+		filtering: filtering elements, format: (e.g. buttherworth/Bessel filters (different filters can be added if needed))
+		[ [type, order_filter , fc] , [ ... ]]
+		E.g. for Tek awg, 
+		[ ['Butt', 1, 300e6], 
+		  ['Bessel', 2, 380e6]
+		]
+		'''
+
+		cdef np.ndarray[ np.double_t, ndim=2 ] my_filter
+
+		# Pulse without filtering
+		if filters is None:
+			self.Lind_obj.add_H1_AWG(np2arma(time_input), np2cx_mat(input_matrix))
+		# pulse with filtering
+		else:
+			# Format data if needed
+			if not isinstance(filters[0], list):
+				filters = [filters]
+			# convert list to numpy format.
+			my_filter = np.zeros([len(filters), 3], dtype = np.double)
+
+			for i in range(len(filters)):
+				my_filter[i,0] = 0 if filters[i][0] == "Bessel" else 1
+				my_filter[i,1] = filters[i][1]
+				my_filter[i,2] = filters[i][2]
+			
+			self.Lind_obj.add_H1_AWG(np2arma(time_input), np2cx_mat(input_matrix), np2arma(my_filter))
+
+
+
+		# self.Lind_obj.add_H1_AWG(np2arma(time_input), np2cx_mat(input_matrix), np2cube(my_filtering))
+	def add_H1_MW_RF_obj(self, microwave_pulse my_mwobj):
+		self.Lind_obj.add_H1_MW_obj(my_mwobj.return_object())
+
+	def add_H1_MW_RF_RWA(self, np.ndarray[ np.complex_t, ndim=2 ] input_matrix, double rabi_f, double phase, double frequency, double start, double stop):
+		self.Lind_obj.add_H1_MW_RWA(np2cx_mat(input_matrix), rabi_f, phase, frequency, start, stop)
+
+	def add_H1_MW_RF_obj_RWA(self, microwave_RWA my_mwobj):
+		self.Lind_obj.add_H1_MW_obj_RWA(my_mwobj.return_object())
+
+
+	def add_H1_element_dep_f(self, np.ndarray[np.complex_t, ndim=2] input_matrix, int i , int j, np.ndarray[np.complex_t, ndim=2] matrix_param):
+		self.Lind_obj.add_H1_element_dep_f(np2cx_mat(input_matrix), i ,j, np2cx_mat(matrix_param))
+
+	def add_static_gauss_noise(self, np.ndarray[ np.complex_t, ndim=2 ] input_matrix, double T2):
+		self.Lind_obj.add_static_gauss_noise(np2cx_mat(input_matrix), T2)
+
+	def add_noise_obj(self, noise_py noise_obj):
+		self.Lind_obj.add_noise_object(noise_obj.return_object());
+
+	def add_1f_noise(self, np.ndarray[ np.complex_t, ndim=2 ] input_matrix, double noise_strength, double alpha=1.):
+		self.Lind_obj.add_1f_noise(np2cx_mat(input_matrix), noise_strength, alpha)
+	
+	def add_cexp_time_dep(self, np.ndarray[int, ndim=2] locations, double frequency):
+		self.Lind_obj.mk_param_time_dep(np2arma(locations), frequency)
+
+	def add_lindbladian(self, np.ndarray[np.complex_t, ndim=2] input_matrix, double input_noise_psd):
+		self.Lind_obj.add_lindbladian(np2cx_mat(input_matrix), input_noise_psd)
+
+	def set_number_of_evalutions(self, int number):
+		self.Lind_obj.set_number_of_evalutions(number)
+
+	def calculate_evolution(self, np.ndarray[np.complex_t, ndim=2] psi0, double start, double stop, int steps):
+		self.times = np.linspace(start,stop, steps+1)
+		self.Lind_obj.calculate_evolution(np2cx_mat(psi0), start, stop, steps)
+
+	def get_times(self):
+		return self.times
+
+	def return_expectation_values(self, np.ndarray[np.complex_t, ndim=3] operators):
+		cdef Mat[double] expect = self.Lind_obj.return_expectation_values(np2cx_cube(operators))
+		cdef np.ndarray[np.float64_t, ndim =2] output = None
+		output = mat2np(expect, output)
+		return output
+
+	def plot_expectation(self, operators, label,number=0):
+		expect = self.return_expectation_values(operators)
+
+		plt.figure(number)
+		for i in range(len(expect)):
+			plt.plot(self.times*1e9, expect[i], label=label[i])
+			plt.xlabel('Time (ns)')
+			plt.ylabel('Population (%)/Expectation')
+			plt.legend()
+
+
+	def get_unitary(self):
+		cdef cx_mat unitary = self.Lind_obj.get_unitary()
+		cdef np.ndarray[np.complex_t, ndim =2] output = None
+		output = cx_mat2np(unitary, output)
+		return output
+
+	def get_lastest_density_matrix(self):
+		cdef cx_mat density = self.Lind_obj.get_lastest_rho()
+		cdef np.ndarray[np.complex_t, ndim =2] output = None
+		output = cx_mat2np(density, output)
+		return output
+
+	def get_all_density_matrices(self):
+		cdef cx_cube density =self.Lind_obj.get_all_density_matrices()
+		cdef np.ndarray[np.complex_t, ndim =3] output = None
+		output = cx_cube2np(density, output)
+		return output

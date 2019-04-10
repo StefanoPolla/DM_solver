@@ -27,7 +27,9 @@ Object for holding all the construction data for the hamiltonian.
 */
 struct data_object_VonNeumannSolver
 {
-	int type;
+	// type is a numeric code for the Hamiltonian part type that this struct represents
+	// 0 -> H0 (Static), 1 -> list controlled, 2 -> AWG pulse, 3 -> MW with RWA, 4 -> MW without RWA
+	int type; 
 	arma::cx_mat input_matrix1;
 	arma::cx_vec input_vector;
 	phase_microwave_RWA MW_obj_RWA;
@@ -56,12 +58,16 @@ struct maxtrix_elem_depen_VonNeumannSolver
 
 class mem_mgmt
 {
-	// Array that holds data of completed Unitaries
+	// Map that holds data of completed Unitaries (NOTE: std::maps are like python dictionaries)
+	// NOTE: elements pointing to completed unitaries are cancelled after being moved in temporary object by task 1) (see get_U_for_DM_calc)
 	std::map<int, std::unique_ptr<unitary_obj> > U_completed;
 
 
 	arma::cx_mat unitary;
 	arma::cx_mat unitary_dagger;
+
+	arma::cx_mat global_dm; // DEV: global density matrix, added for Lindblad solver, necessary as evolution is not unitary anymore.
+
 	int size;
 	
 
@@ -112,7 +118,7 @@ public:
 
 	std::unique_ptr<unitary_obj> get_U_for_DM_calc(int last_processed_id){
 
-
+		// move transfers ownership of the object to newly crated unique_ptr
 		std::unique_ptr<unitary_obj> my_unitary_ptr = std::move(U_completed[last_processed_id]);
 
 		#pragma omp critical
@@ -120,5 +126,9 @@ public:
 
 
 		return std::move(my_unitary_ptr);
+	}
+
+	const arma::cx_mat& get_unitary(){ // NOTE: function used for a test (for now)
+		return unitary;
 	}
 };

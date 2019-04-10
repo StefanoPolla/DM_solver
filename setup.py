@@ -19,6 +19,8 @@ extensions = [
 		language="c++",
 		libraries=["armadillo","gomp",],
 		extra_compile_args=['-fopenmp'],
+		# extra_linker_args can be added to allow gcc to find openMP. specify the right path if using
+		extra_link_args=['-fopenmp', '-Wl,-rpath,/usr/local/Cellar/gcc/8.3.0/lib/gcc/8/'],
 	  )
 ]
 

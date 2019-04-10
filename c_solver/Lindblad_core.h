@@ -9,18 +9,34 @@
 #include <string>
 #include <memory>
 #include <map>
+/* NOTE: all this stuff is included by VonNeumannCore, which is still the core of the code.
 #include "math_functions.h"
 #include "signal_functions.h"
 #include "memory_mgmt.h"
 #include "dependency_functions.h"
 #include "noise_functions.h"
 #include "hamiltonian_constructor.h"
-#include "Lindblad_core.h"
+*/
 // #include "omp.h"
 #include <chrono> 
 
+// NOTE: comments starting like this are my personal notes (Stefano)
+// DEV: marks the lines relating to things i'm developing right now
 
-class VonNeumannSolver
+struct lindblad_obj // DEV
+{
+	double T2;
+	double noise_psd;
+	int type;
+	// type 0 = dephasing / white noise in Hamiltonian
+	
+	arma::cx_mat jump_down;
+	arma::cx_mat jump_down_dag;
+	arma::cx_mat jump_updown;
+};
+
+
+class LindbladSolver
 {
 	int size;
 	int iterations = 1;
@@ -29,10 +45,18 @@ class VonNeumannSolver
 	std::vector<data_object_VonNeumannSolver> my_init_data;
 	std::vector<maxtrix_elem_depen_VonNeumannSolver> my_parameter_depence;
 	std::vector<noise> my_noise_data;
+	std::vector<lindblad_obj> my_lindblad_operators; // DEV
+
 public:
-	VonNeumannSolver(int size_matrix){
+	LindbladSolver(int size_matrix){
 		size= size_matrix;
 	}
+
+	// NOTE: test function
+	int test_cython(){
+		std::cout << "a function to test cython compiling" << std::endl;
+		return 42;
+		}
 
 	void add_H0(arma::cx_mat input_matrix){
 		// Constant hamiltonian part, does not change in time.
@@ -58,7 +82,7 @@ public:
 	// 	AWG_pulse mypulse;
 	// 	mypulse.init(amp,skew,start,stop);
 	// 	temp.AWG_obj = mypulse;
-	// 	my_init_data.push_back(temp);
+	// 	my_init_data.push_back(temp);o
 	// }
 
 	void add_H1_AWG(arma::mat pulse_data, arma::cx_mat input_matrix){
@@ -145,6 +169,20 @@ public:
 	void add_noise_object(noise noise_obj){
 		my_noise_data.push_back(noise_obj);
 	}
+
+	// DEV
+	void add_lindbladian(arma::cx_mat input_matrix, double input_noise_psd){ // NOTE: psd = power spectral density = amplitude^2
+		lindblad_obj lind_tmp;
+		lind_tmp.noise_psd = input_noise_psd;
+		lind_tmp.jump_down = input_matrix;
+		lind_tmp.jump_down_dag = input_matrix.t();
+		lind_tmp.jump_updown = lind_tmp.jump_down_dag * lind_tmp.jump_down;
+		lind_tmp.type = 0; // DEV NOTE: is this needed?
+
+		my_lindblad_operators.push_back(lind_tmp);
+	}
+
+
 	
 	void set_number_of_evalutions(int iter){
 		iterations = iter;
@@ -189,12 +227,18 @@ public:
 			// Counters for indicating what is already done.
 			int unitaries_processed = 0;
 			int elements_processed = 0;
+			
+			bool dm_task_done = true;
+			bool continue_dm_calculations = true;
+
 
 			// initialize object that will manage the memory.
 			mem_mgmt mem = mem_mgmt(size);
 
+			std::cout << "starting to preload noise" << std::endl;
 			// Preload noise:
 			preload_noise(&my_noise_data, start_time, stop_time, steps);
+			std::cout << "noise preloaded" << std::endl;
 
 			// std::cout << delta_t << "Number of unitaries to calculate" << number_of_calc_steps << "\n";
 			#pragma omp parallel // shared(my_density_matrices_tmp_ptr, unitary_tmp, size)
@@ -221,65 +265,115 @@ public:
 						// avoid just launching all threads at the same time! Use event based trigger.
 						// 0b)
 						if (elements_processed == number_of_calc_steps){
+							std::cout << "taskwait" << std::endl;
 							#pragma omp taskwait
 							done = true;
+							std::cout << "taskwaited" << std::endl;
 							continue;
 						}
 
 						// 1)
-						if (mem.check_U_for_calc(elements_processed)){
-							// ^ NOTE: checks if mem.U_completed (map<int, unitary_obj*>) contains an object with index elements_processed, then
-							//         if true, it takes the found "current Unitary object" cUo = *U_completed[elements_processed] and initializes it:
-							//            - set up x.unitary_start using global mem.unitary
-							//            - evolves global mem.unitary using cUo.unitary_local_operation
+						#pragma omp atomic read // check and update elements_processed only if the atom is stable
+						continue_dm_calculations = dm_task_done;
 
+						if (continue_dm_calculations)
+							if (mem.check_U_for_calc(elements_processed)){
+								dm_task_done = false;
+								continue_dm_calculations = false;
 
-							std::cout << "Starting DM_calc" << elements_processed << std::endl;
-							
-							// processes an element in a new task
-							#pragma omp task firstprivate(elements_processed) // freezes the value of element_processed
-							{
-								std::unique_ptr<unitary_obj> DM_ptr; // NOTE*: what does DM mean here? this clearly refers to a bunch of unitaries, not a DM.
-								DM_ptr = mem.get_U_for_DM_calc(elements_processed); // transfer ownership of cUo from U_completed[elements_processed]
-								// cUo reference is now removed from mem. Now cUo is owned by DM_ptr, a local unique_ptr.
+								// std::cout << "Starting DM_calc" << elements_processed << "\n";
+								
+								// DEV: Unfortunately, in the Lindblad case, parallelization of the trajectory calculation cannot be done in this implementation.
+								// in fact, as the evolution is non-unitary and only unitary parts of the process are stored in this implementation, 
+								// knowledge the density matrix at the previous step is needed at all points in this calculation.
+								// temporary solution: make all the trajectory calculations sequential! This is done by increasing elements_processed inside task
+								// DM trajectory calculations can be tasked in parallel to the evolution unitaries calculation (matrix exponentials), 
+								// but multiple DM trajectory calculations will not start in parallel.
+								// This requires a parallelization structure to avoid races on elements_processed, realized with one atom protected by critical statements
 
-								if (elements_processed == number_of_calc_steps-1){ // if it's the last element, set the final output unitary
-									// unitary_tmp = (DM_ptr->unitary_start)*(DM_ptr->unitary_local_operation); // NOTE*: why not global mem.unitary?
-									// NOTE*: also, the matrix product order seems wrong here. local_operation is the last applied, has to be leftmost.
-									// Adjusted version:
-									unitary_tmp = (DM_ptr->unitary_local_operation)*(DM_ptr->unitary_start);
-									// std::cerr << arma::approx_equal(unitary_tmp, mem.get_unitary(), "absdiff", 1.0e-10) << std::endl; // now outputs True!
+								// processes an element in a new task 
+
+								#pragma omp task firstprivate(elements_processed) // elements_processed is frozen inside task
+								{
+									//#pragma omp critical (debug)
+									std::cout << "begin task A: " << elements_processed << std::endl; // DEV
+
+									std::unique_ptr<unitary_obj> DM_ptr; // NOTE: what does DM mean? this doesn't point to dm but to unitaries
+
+									DM_ptr = mem.get_U_for_DM_calc(elements_processed); // transfer ownership of cUo
+
+									if (elements_processed == number_of_calc_steps-1){ // if it's the last element, set the final output unitary (unitary_tmp)
+										// unitary_tmp = (DM_ptr->unitary_start)*(DM_ptr->unitary_local_operation); // NOTE*: why not global mem.unitary?
+										// NOTE*: also, the matrix product order seems wrong here. local_operation is the last applied, has to be leftmost.
+										// Adjusted version:
+										unitary_tmp = (DM_ptr->unitary_local_operation)*(DM_ptr->unitary_start);
+										// std::cerr << arma::approx_equal(unitary_tmp, mem.get_unitary(), "absdiff", 1.0e-10) << std::endl; // now outputs True!
+										
+									}
+										
+									int const init = calc_distro(elements_processed);
+									int n_elem = DM_ptr->hamiltonian.n_slices;
+
+									// arma::cx_mat unitary_tmp2 = DM_ptr->unitary_start;
+
+									// here the first dm in batch is evolved, using either psi0 or the previous batch end matrix
+									if (init == 0) 
+										my_density_matrices_tmp_ptr->slice(init) = psi0;
+									else {
+										my_density_matrices_tmp_ptr->slice(init) = (DM_ptr->unitary_start * 
+																					my_density_matrices_tmp_ptr->slice(init-1) * 
+																					DM_ptr->unitary_start_dagger);
+
+										for (int k = 0; k < my_lindblad_operators.size(); ++k){
+												lindblad_obj l_ptr = my_lindblad_operators.at(k);
+												my_density_matrices_tmp_ptr->slice(init) += delta_t * l_ptr.noise_psd * (
+															l_ptr.jump_down * my_density_matrices_tmp_ptr->slice(init-1) * l_ptr.jump_down_dag +
+															- 0.5 * l_ptr.jump_updown * my_density_matrices_tmp_ptr->slice(init-1) +
+															- 0.5 * my_density_matrices_tmp_ptr->slice(init-1) * l_ptr.jump_updown
+															);
+										}
+									}
+
+									// std::cout << "U\n" << unitary_tmp << "\n" << (DM_ptr->unitary_start);
+									for (int j = 0; j < n_elem; ++j ){
+										// unitary_tmp *= DM_ptr->hamiltonian.slice(j);
+										// unitary_tmp2 *= DM_ptr->hamiltonian.slice(j);
+										// my_density_matrices_tmp.slice(j + init+ 1) = unitary_tmp2*
+										// 				psi0*unitary_tmp2.t();
+
+										// NOTE: here the density matrix is evolved for all elements in batch except the first
+										my_density_matrices_tmp_ptr->slice(j + init + 1) = DM_ptr->hamiltonian.slice(j)*
+														my_density_matrices_tmp_ptr->slice(j + init)*DM_ptr->hamiltonian.slice(j).t();
 									
+										// DEV
+										// PSEUDOCODE:
+										// for lindobj in lindobj_list:
+										// my_density_matrices_tmp_ptr->slice(j + init + 1) += PSD * (
+										//				lindobj.jump_down * my_density_matrices_tmp_ptr->slice(j + init) * lindobj.jump_down_dag +
+										//				- 0.5 * lindobj.jump_updown * my_density_matrices_tmp_ptr->slice(j + init) +
+										//				- 0.5 * my_density_matrices_tmp_ptr->slice(j + init) * lindobj.jump_updown
+										//				)
+										for (int k = 0; k < my_lindblad_operators.size(); ++k){
+											lindblad_obj l_ptr = my_lindblad_operators.at(k);
+											my_density_matrices_tmp_ptr->slice(j + init + 1) += delta_t * l_ptr.noise_psd * (
+														l_ptr.jump_down * my_density_matrices_tmp_ptr->slice(j + init) * l_ptr.jump_down_dag +
+														- 0.5 * l_ptr.jump_updown * my_density_matrices_tmp_ptr->slice(j + init) +
+														- 0.5 * my_density_matrices_tmp_ptr->slice(j + init) * l_ptr.jump_updown
+														);
+										}
+									}
+
+									//#pragma omp critical (debug)
+									std::cout << "end task A: " << elements_processed << std::endl; // DEV
+
+									// std::cout << "clearing chache" << elements_processed << "\n";
+									#pragma omp atomic write // update the atom expression, while doing so block the possibility to read it
+									dm_task_done = true;
 								}
-								
-								int const init = calc_distro(elements_processed);
-								int n_elem = DM_ptr->hamiltonian.n_slices;
+								++elements_processed;
 
-								// arma::cx_mat unitary_tmp2 = DM_ptr->unitary_start;
-
-								// here the first matrix in the batch is initialized by evolving psi_0 with cUo.unitary_start
-								my_density_matrices_tmp_ptr->slice(init) = DM_ptr->unitary_start*psi0*DM_ptr->unitary_start_dagger;
-								
-								// std::cout << "U\n" << unitary_tmp << "\n" << (DM_ptr->unitary_start);
-								for (int j = 0; j < n_elem; ++j ){
-									// unitary_tmp *= DM_ptr->hamiltonian.slice(j);
-									// unitary_tmp2 *= DM_ptr->hamiltonian.slice(j);
-									// my_density_matrices_tmp.slice(j + init+ 1) = unitary_tmp2*
-									// 				psi0*unitary_tmp2.t(); 
-
-									// NOTE: here (and above) the density matrix is evolved
-									my_density_matrices_tmp_ptr->slice(j + init+ 1) = DM_ptr->hamiltonian.slice(j)*
-													my_density_matrices_tmp_ptr->slice(j + init)*DM_ptr->hamiltonian.slice(j).t();
-
-								}
-								
-								std::cout << "clearing chache" << elements_processed << std::endl;
-
-							} // NOTE: task end. As DM_ptr goes out of scope here, cUo is erased from memory
-							++elements_processed;
-
-							continue;
-						}
+								continue;
+							}
 
 						// 2)
 						if (unitaries_processed == number_of_calc_steps){
@@ -293,35 +387,35 @@ public:
 
 						#pragma omp task firstprivate(unitaries_processed, init, end) //, my_init_data, my_parameter_depence, my_noise_data, delta_t)
 						{
-							std::cout << "Starting unitary clac" << unitaries_processed << std::endl;
+							//#pragma omp critical (debug)
+							std::cout << "begin task B: " << unitaries_processed << std::endl; // DEV
 
-							int n_elem = end-init; // might vary if batch_size doesn't divide steps
+							int n_elem = end-init;
 
-							// NOTE: create a unitary_obj to work on, setting up: - unitary_start and unitary_local as identities
-							//												      - hamiltonian cube with n_elem slices as all zeros
-							std::unique_ptr<unitary_obj> unitary_ptr =  mem.get_cache(n_elem); 
-							// std::cout << init << "\t" << end << "\t" << unitary_ptr->hamiltonian.n_slices << "\n";
-							const std::complex<double> comp(0, 1); // imaginary unit
+							std::unique_ptr<unitary_obj> unitary_ptr =  mem.get_cache(n_elem);
+							// // std::cout << init << "\t" << end << "\t" << unitary_ptr->hamiltonian.n_slices << "\n";
+							const std::complex<double> comp(0, 1);
 
-							double start_time = init * delta_t;
-							double end_time = end * delta_t;
+							double start_time = init*delta_t;
+							double end_time = end*delta_t;
 
 							// pointer of variable of class of unique pointer?
 							contruct_hamiltonian( &(unitary_ptr->hamiltonian), init, end, 
 								start_time, end_time, delta_t,
 								&my_init_data, &my_parameter_depence, &my_noise_data);
 							for (int k = 0; k < n_elem; ++k){
-								// NOTE: here the evo (matrix exponentials) are calculated for all the batch
-								//       the .hamiltonian slices will not be "hamiltonians" anymore but will be updated to unitary dt-evolutions
+								// NOTE: Here the evolution (matrix exponential) is calculated here for all elements in the batch (from init to end)
 								unitary_ptr->hamiltonian.slice(k) = custom_matrix_exp(-comp*unitary_ptr->hamiltonian.slice(k));
 								unitary_ptr->unitary_local_operation = unitary_ptr->hamiltonian.slice(k)*unitary_ptr->unitary_local_operation;
 								unitary_ptr->unitary_local_operation_dagger = unitary_ptr->unitary_local_operation_dagger*unitary_ptr->hamiltonian.slice(k).t();
 							}
 
 							// std::cout << unitary_ptr->unitary_local_operation << unitary_ptr->unitary_local_operation_dagger << std::endl;
-							// NOTE: ownership of the current unitary object is moved to mem.U_completed[unitaries_processed] (which is now created)
 							mem.unitary_calc_done(unitaries_processed, std::move(unitary_ptr));
-							std::cout << "finshed task for unitary calcualtion" << unitaries_processed << std::endl;
+							// std::cout << "finshed task for unitary calcualtion" << unitaries_processed << "\n";
+							
+							//#pragma omp critical (debug)
+							std::cout << "end task B: " << unitaries_processed << std::endl; // DEV
 						}
 
 						++unitaries_processed;
@@ -329,19 +423,20 @@ public:
 				}
 			}
 
+			std::cout << "postparallel" << std::endl;
 
 			// make if statements to only do this calculations when neccary
 			if (iterations > 1)
 				my_density_matrices += my_density_matrices_tmp; // add up the density matrices for each iteration step
-			unitary += unitary_tmp; // NOTE*: what's the meaning of adding up unitaries?
+			unitary += unitary_tmp; // NOTE: what's the meaning of adding up unitaries?
 			
-
+			std::cout << "restart iteration" << std::endl;
 
 			
 		} // END for loop over iterations
 		if (iterations>1){
 			my_density_matrices /= iterations; // normalize
-			unitary /= iterations; // NOTE*: as above, why averaging unitaries? does this object have some meaning?
+			unitary /= iterations; // NOTE: as above, why averaging unitaries? does this object have some meaning?
 		}		
 	}
 
